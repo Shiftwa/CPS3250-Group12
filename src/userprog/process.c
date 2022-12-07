@@ -74,7 +74,7 @@ pid_t process_execute(const char* file_name) {
 static void start_process(void* file_name_) {
   char* file_name = (char*)file_name_;
   struct thread* t = thread_current();
-  struct intr_frame if_;
+  struct intr_frame if_; // interrupt frame
   bool success, pcb_success;
 
   /* Allocate process control block */
@@ -119,6 +119,9 @@ static void start_process(void* file_name_) {
     thread_exit();
   }
 
+  /*Reserve stack space for userprogram parameters*/
+  if_.esp -= 0x14;
+  
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
      threads/intr-stubs.S).  Because intr_exit takes all of its
@@ -474,6 +477,7 @@ static bool setup_stack(void** esp) {
     success = install_page(((uint8_t*)PHYS_BASE) - PGSIZE, kpage, true);
     if (success)
       *esp = PHYS_BASE;
+      // *esp -= 0x20; 
     else
       palloc_free_page(kpage);
   }

@@ -19,11 +19,22 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
    * include it in your final submission.
    */
 
-  /* printf("System call number: %d\n", args[0]); */
+  /* printf("System call number: %d\n", args[0  ]); */
 
   if (args[0] == SYS_EXIT) {
     f->eax = args[1];
     printf("%s: exit(%d)\n", thread_current()->pcb->process_name, args[1]);
     process_exit();
+  } 
+  else if (args[0] == SYS_WRITE){
+    int fd = args[1]; // file descriptor : 文件描述符
+    const char* buffer = (const char*)args[2];
+    unsigned len = args[3];
+    if(fd ==1){
+      // output to console
+    putbuf(buffer,len);
+    }
+    f->eax = len;
   }
 }
+
