@@ -55,11 +55,13 @@ pid_t process_execute(const char* file_name) {
   tid_t tid;
 
   sema_init(&temporary, 0);
+
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page(0);
   if (fn_copy == NULL)
     return TID_ERROR;
+
   strlcpy(fn_copy, file_name, PGSIZE);
 
   /* Create a new thread to execute FILE_NAME. */
@@ -67,6 +69,103 @@ pid_t process_execute(const char* file_name) {
   if (tid == TID_ERROR)
     palloc_free_page(fn_copy);
   return tid;
+}     
+
+/*push args to user program stack */
+static void args_push(char*  filename ,void ** pesp){
+  // int argc = 0;
+  // char** argv = NULL;
+  char* esp = (char*) *pesp;
+  // char* token = NULL;
+  // char* rest = filename;
+
+  // calc argc 
+  // while ((token = strtok_r(rest," ",&rest))){
+  //   argc++;
+  // } 
+  
+  // argv = malloc(sizeof(char*) * argc);
+
+  //initialize agrv
+  int argc =1 ;
+  char *rest = NULL;
+  char *token = strtok_r(filename," ", &rest);
+  char ** argv = malloc(sizeof(char*));
+  int argv_str_size = 0;
+  // int i = 0;
+  // token = NULL;
+  // rest =  filename;
+  // while((token = strtok_r(rest," ",&rest))){
+  do{
+  int size = strlen(token) +1; // return the ith token, get token size // 重要错误！！！！ 之前写成 strlen(token+1); 
+  esp -= size; // stack generate space for ith arg
+
+  strlcpy(esp,token,size);
+  esp[size -1] = 0;
+  // argv[i++] = esp;
+  if(argc >0){
+    argv =realloc(argv,sizeof(char*) * argc);
+  }
+  argv[argc - 1] = esp;
+  argv_str_size += size;
+  }while((token = strtok_r(NULL," ", &rest)) ? (argc++) : false);
+
+  //calculate the stack align size
+  int stack_align_size = 0;
+  int size = (argc+1) * sizeof(char*)/*argv+ '\0'*/ 
+            +sizeof(int) /* argc*/ 
+            + argv_str_size
+            + sizeof(char**) /*char* argv[]*/;
+  
+  // if stack_algn failed , do aligning operation
+  if(size % 0x10){
+    stack_align_size += (0x10 - size % 0x10);
+    esp -= stack_align_size;
+    memset(esp,0,stack_align_size);
+  }
+
+// push argv to stack
+// argv"\0"
+esp -= 0x4;
+*(char**) esp =0;
+for (int i = argc-1;  i>=0; --i)
+{
+  esp -= 0x4;
+  *(char**) esp = argv[i];
+} 
+
+free(argv);
+
+// char * argv[]
+esp -= 0x4;
+*(char***)esp = (esp+0x4);
+
+// argc 
+esp -= 0x4;
+*(int *) esp = argc;
+
+// reserve "rip" space
+esp -= 0x4;
+*(int *) esp = 0;
+
+*pesp = (void*) esp;
+  
+} 
+
+const char* get_base_file_name(const char* file_name){
+char * base_file_name = malloc(strlen(file_name)+1);
+if(!base_file_name){
+  return base_file_name;
+}
+memset(base_file_name,0,strlen(file_name)+1);
+strlcpy(base_file_name,file_name,strlen(file_name)+1);
+
+char* pc = strchr(base_file_name,' ');
+if(pc){
+  *pc = 0;
+}
+return base_file_name;
+
 }
 
 /* A thread function that loads a user process and starts it
@@ -77,10 +176,11 @@ static void start_process(void* file_name_) {
   struct intr_frame if_; // interrupt frame
   bool success, pcb_success;
 
-  /* Allocate process control block */
+    /* Allocate process control block */
+  char* base_file_name =  get_base_file_name(file_name);
   struct process* new_pcb = malloc(sizeof(struct process));
   success = pcb_success = new_pcb != NULL;
-
+  
   /* Initialize process control block */
   if (success) {
     // Ensure that timer_interrupt() -> schedule() -> process_activate()
@@ -90,7 +190,8 @@ static void start_process(void* file_name_) {
 
     // Continue initializing the PCB as normal
     t->pcb->main_thread = t;
-    strlcpy(t->pcb->process_name, t->name, sizeof t->name);
+    // strlcpy(t->pcb->process_name, t->name, sizeof t->name);
+    strlcpy(t->pcb->process_name, base_file_name,strlen(base_file_name)+1);
   }
 
   /* Initialize interrupt frame and load executable. */
@@ -99,19 +200,24 @@ static void start_process(void* file_name_) {
     if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
     if_.cs = SEL_UCSEG;
     if_.eflags = FLAG_IF | FLAG_MBS;
-    success = load(file_name, &if_.eip, &if_.esp);
+    success = load(base_file_name, &if_.eip, &if_.esp);
+    free(base_file_name);
   }
 
-  /* Handle failure with succesful PCB malloc. Must free the PCB */
+  /* Handle failure with succesful PCB malloc. Must free  the PCB */
   if (!success && pcb_success) {
-    // Avoid race where PCB is freed before t->pcb is set to NULL
+    // Avoid race where PCB is d before t->pcb is set to NULL
     // If this happens, then an unfortuantely timed timer interrupt
-    // can try to activate the pagedir, but it is now freed memory
+    // can try to activate the pagedir, but it is now d memory
     struct process* pcb_to_free = t->pcb;
     t->pcb = NULL;
     free(pcb_to_free);
   }
 
+  if (success){
+  // Todo:  push args on user program stack
+  args_push(file_name, &if_.esp);
+  }
   /* Clean up. Exit on failure or jump to userspace */
   palloc_free_page(file_name);
   if (!success) {
@@ -120,7 +226,7 @@ static void start_process(void* file_name_) {
   }
 
   /*Reserve stack space for userprogram parameters*/
-  if_.esp -= 0x14;
+  // if_.esp -= 0x14;
   
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -146,7 +252,7 @@ int process_wait(pid_t child_pid UNUSED) {
   return 0;
 }
 
-/* Free the current process's resources. */
+/*  the current process's resources. */
 void process_exit(void) {
   struct thread* cur = thread_current();
   uint32_t* pd;
@@ -167,20 +273,19 @@ void process_exit(void) {
          process page directory.  We must activate the base page
          directory before destroying the process's page
          directory, or our active page directory will be one
-         that's been freed (and cleared). */
+         that's been d (and cleared). */
     cur->pcb->pagedir = NULL;
     pagedir_activate(NULL);
     pagedir_destroy(pd);
   }
 
-  /* Free the PCB of this process and kill this thread
-     Avoid race where PCB is freed before t->pcb is set to NULL
+  /*  the PCB of this process and kill this thread
+     Avoid race where PCB is d before t->pcb is set to NULL
      If this happens, then an unfortuantely timed timer interrupt
-     can try to activate the pagedir, but it is now freed memory */
+     can try to activate the pagedir, but it is now d memory */
   struct process* pcb_to_free = cur->pcb;
   cur->pcb = NULL;
   free(pcb_to_free);
-
   sema_up(&temporary);
   thread_exit();
 }
@@ -198,7 +303,7 @@ void process_activate(void) {
 
   /* Set thread's kernel stack for use in processing interrupts.
      This does nothing if this is not a user process. */
-  tss_update();
+    tss_update();
 }
 
 /* We load ELF binaries.  The following definitions are taken
@@ -546,8 +651,8 @@ static void start_pthread(void* exec_ UNUSED) {}
    now, it does nothing. */
 tid_t pthread_join(tid_t tid UNUSED) { return -1; }
 
-/* Free the current thread's resources. Most resources will
-   be freed on thread_exit(), so all we have to do is deallocate the
+/*  the current thread's resources. Most resources will
+   be d on thread_exit(), so all we have to do is deallocate the
    thread's userspace stack. Wake any waiters on this thread.
 
    The main thread should not use this function. See
